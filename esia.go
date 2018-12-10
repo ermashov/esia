@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"time"
+	"strings"
 	"fmt"
     "crypto/rand"
     "crypto/x509"
@@ -14,7 +15,9 @@ import (
     "encoding/json"
     "github.com/fullsailor/pkcs7"
     "net/url"
+    "errors"
 )
+
 
 type ConfigOpenId struct {
     MnemonicsSystem string
@@ -29,8 +32,21 @@ type ConfigOpenId struct {
     TokenUrl string
 }
 
+type EsiaAuthCode struct {
+    Nbf string  `json:"-"`
+    Scope string  `json:"scope"`
+    Iss string  `json:"iss"`
+    UrnEsiaSid string  `json:"urn:esia:sid"`
+    UrnEsiaSbjId int32  `json:"urn:esia:sbj_id"`
+    Iat int32  `json:"iat"`
+    ClientId string  `json:"client_id"`
+    Exp int32 `json:"exp"`
+}
+
+
 type EsiaToken struct {
     AccessToken string  `json:"access_token"`
+    AuthCode EsiaAuthCode  `json:"-"`
     RefreshToken string  `json:"refresh_token"`
     State string  `json:"state"`
     TokenType string  `json:"token_type"`
@@ -39,7 +55,33 @@ type EsiaToken struct {
 
 type OpenId struct {
     Config ConfigOpenId
-    AccessToken string
+    Token string
+    Oid int32
+}
+
+type EsiaPerson struct {
+    FirstName string  `json:"firstName"`
+    LastName string  `json:"lastName"`
+    MiddleName string  `json:"middleName"`
+    Trusted bool  `json:"trusted"`
+    Citizenship string  `json:"citizenship"`
+    Status string  `json:"status"`
+    Verifying bool  `json:"verifying"`
+    RIdDoc int32 `json:"rIdDoc"`
+    ContainsUpCfmCode bool  `json:"containsUpCfmCode"`
+    ETag string  `json:"eTag"`
+}
+
+type EsiaDocs struct {
+    Id int32 `json:"id"`
+    Type string `json:"type"`
+    VrfStu string `json:"vrfStu"`
+    Series string `json:"series"`
+    Number string `json:"number"`
+    IssueDate string `json:"issueDate"`
+    IssueId string `json:"issueId"`
+    IssuedBy string `json:"issuedBy"`
+    Etag string  `json:"eTag"`
 }
 
 func (c *OpenId) GetState() (string, error){
@@ -99,42 +141,33 @@ func (c *OpenId) GetUrl() (string, error){
     return Url.String(), nil
 }
 
-func (c *OpenId) GetInfoByPath() (string, error){
+func (c *OpenId) GetInfoByPath(path string, item interface{}) (error){
 
-    state, err := c.GetState()
+   if c.Oid <= 0 {
+        return errors.New("Oid empty")
+   }
+   if len(c.Token) <= 0 {
+        return errors.New("Token empty")
+   }
+    client := &http.Client{}
+
+    req, err := http.NewRequest("GET", c.Config.PortalUrl + "rs/prns/"+ fmt.Sprint(c.Oid) + path, nil)
+    req.Header.Add("Authorization", "Bearer " + c.Token)
+    resp, err := client.Do(req)
     if err != nil {
-        return "", err
+        return err
     }
-
-    timestamp := c.GetTimeStamp()
-    clientSecret := c.Config.Scope + timestamp + c.Config.MnemonicsSystem + state
-    clientSecret, err = c.Sign(clientSecret)
+    defer resp.Body.Close()
+    body, err := ioutil.ReadAll(resp.Body)
     if err != nil {
-        return "", err
+        return err
     }
-
-    var Url *url.URL
-    Url, err = url.Parse(c.Config.PortalUrl)
+    err = json.Unmarshal(body, &item)
     if err != nil {
-         return "", err
+        return  err
     }
 
-    Url.Path += c.Config.CodeUrl
-
-    params := &url.Values{
-        "client_id": []string{c.Config.MnemonicsSystem},
-        "client_secret": []string{clientSecret},
-        "redirect_uri": []string{c.Config.RedirectUrl},
-        "scope": []string{c.Config.Scope},
-        "response_type": []string{"code"},
-        "state": []string{state},
-        "access_type": []string{"offline"},
-        "timestamp": []string{timestamp},
-    }
-
-    Url.RawQuery = params.Encode()
-
-    return Url.String(), nil
+    return nil
 }
 
 func (c *OpenId) GetTokenState(code string) (EsiaToken, error){
@@ -177,16 +210,22 @@ func (c *OpenId) GetTokenState(code string) (EsiaToken, error){
         return esiaToken, err
     }
 
-    //base64.RawURLEncoding.DecodeString(esiaToken)
-    data, err := base64.StdEncoding.DecodeString(esiaToken.AccessToken)
+    chunks := strings.Split(esiaToken.AccessToken, ".")
+    data, err := base64.URLEncoding.DecodeString(chunks[1])
+    if err != nil{
+        data, err = base64.URLEncoding.DecodeString(chunks[1] + "==")
+        if err != nil{
+            return esiaToken, err
+        }
+    }
+
+    err = json.Unmarshal([]byte(string(data)), &esiaToken.AuthCode)
     if err != nil {
-        fmt.Println("error:", err)
         return esiaToken, err
     }
-    fmt.Printf("%q\n", esiaToken.AccessToken)
-    fmt.Printf("%q\n", data)
 
-    c.AccessToken = esiaToken.AccessToken
+    c.Token = esiaToken.AccessToken
+    c.Oid = esiaToken.AuthCode.UrnEsiaSbjId
 
     return esiaToken, nil
 }
@@ -229,7 +268,6 @@ func (c *OpenId) Sign(message string) (string, error){
     if err != nil {
          return "", err
     }
-
     if err := toBeSigned.AddSigner(certParseResult, privateKeyBufferParseResult, pkcs7.SignerInfoConfig{}); err != nil {
          return "", err
     }
@@ -240,7 +278,7 @@ func (c *OpenId) Sign(message string) (string, error){
          return "", err
     }
 
-    sig := base64.RawURLEncoding.EncodeToString(signed)
+    sig := base64.URLEncoding.EncodeToString(signed)
 
     return sig, nil
 }
