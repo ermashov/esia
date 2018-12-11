@@ -3,7 +3,7 @@
 ```Golang
 Esia openId
 
-siaOpenId := &esia.OpenId{  
+esiaOpenId := &esia.OpenId{  
       Config: esia.ConfigOpenId{  
               MnemonicsSystem:"000000",  
               RedirectUrl:"https://site/esia",  
